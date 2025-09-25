@@ -149,8 +149,40 @@ class ChatViewModel(
         }
         
         // Removed background location notes subscription. Notes now load only when sheet opens.
+
+        // Initialize Wi-Fi Aware transport
+        viewModelScope.launch {
+            try {
+                val router = com.bitchat.android.services.MessageRouter.getInstance(getApplication(), meshService)
+                router.initializeWiFiAware()
+                
+                // Set up Wi-Fi Aware delegate to use our mesh delegate handler
+                val wifiAwareTransport = getWiFiAwareTransport()
+                if (wifiAwareTransport != null) {
+                    val adapter = com.bitchat.android.`wifi-aware`.WiFiAwareDelegateAdapter(meshDelegateHandler)
+                    wifiAwareTransport.delegate = adapter
+                    Log.d(TAG, "Wi-Fi Aware transport initialized and delegate set")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to initialize Wi-Fi Aware", e)
+            }
+        }
     }
 
+    private fun getWiFiAwareTransport(): com.bitchat.android.`wifi-aware`.WiFiAwareTransport? {
+        return try {
+            val router = com.bitchat.android.services.MessageRouter.tryGetInstance()
+            router?.let {
+                val wifiAwareField = it.javaClass.getDeclaredField("wifiAware")
+                wifiAwareField.isAccessible = true
+                wifiAwareField.get(it) as? com.bitchat.android.`wifi-aware`.WiFiAwareTransport
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to access Wi-Fi Aware transport", e)
+            null
+        }
+    }
+    
     fun cancelMediaSend(messageId: String) {
         // Delegate to MediaSendingManager which tracks transfer IDs and cleans up UI state
         mediaSendingManager.cancelMediaSend(messageId)

@@ -67,6 +67,12 @@ class PermissionManager(private val context: Context) {
             Manifest.permission.ACCESS_FINE_LOCATION
         ))
 
+        // Wi-Fi Aware permission (only NEARBY_WIFI_DEVICES needs runtime request)
+        // ACCESS_WIFI_STATE, CHANGE_WIFI_STATE, and CHANGE_NETWORK_STATE are normal permissions
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && hasWiFiAwareSupport()) {
+            permissions.add(Manifest.permission.NEARBY_WIFI_DEVICES)
+        }
+
         // Notification permission intentionally excluded to keep it optional
 
         return permissions
@@ -123,6 +129,23 @@ class PermissionManager(private val context: Context) {
     fun isBatteryOptimizationSupported(): Boolean {
         return Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
     }
+    
+    /**
+     * Check if Wi-Fi Aware is supported on this device
+     */
+    fun hasWiFiAwareSupport(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            try {
+                val wifiAwareManager = context.getSystemService(Context.WIFI_AWARE_SERVICE)
+                wifiAwareManager != null
+            } catch (e: Exception) {
+                Log.e(TAG, "Error checking Wi-Fi Aware support", e)
+                false
+            }
+        } else {
+            false
+        }
+    }
 
     /**
      * Get the list of permissions that are missing
@@ -138,25 +161,38 @@ class PermissionManager(private val context: Context) {
         val categories = mutableListOf<PermissionCategory>()
 
         // Bluetooth/Nearby Devices category
-        val bluetoothPermissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            listOf(
+        val nearbyDevicesPermissions = mutableListOf<String>()
+        
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            nearbyDevicesPermissions.addAll(listOf(
                 Manifest.permission.BLUETOOTH_ADVERTISE,
                 Manifest.permission.BLUETOOTH_CONNECT,
                 Manifest.permission.BLUETOOTH_SCAN
-            )
+            ))
         } else {
-            listOf(
+            nearbyDevicesPermissions.addAll(listOf(
                 Manifest.permission.BLUETOOTH,
                 Manifest.permission.BLUETOOTH_ADMIN
-            )
+            ))
+        }
+        
+        // Add Wi-Fi Aware permission for Android 13+ if hardware supports it
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && hasWiFiAwareSupport()) {
+            nearbyDevicesPermissions.add(Manifest.permission.NEARBY_WIFI_DEVICES)
+        }
+        
+        val description = if (hasWiFiAwareSupport() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            "Required to discover bitchat users via Bluetooth and Wi-Fi Aware"
+        } else {
+            "Required to discover bitchat users via Bluetooth"
         }
 
         categories.add(
             PermissionCategory(
                 type = PermissionType.NEARBY_DEVICES,
-                description = "Required to discover bitchat users via Bluetooth",
-                permissions = bluetoothPermissions,
-                isGranted = bluetoothPermissions.all { isPermissionGranted(it) },
+                description = description,
+                permissions = nearbyDevicesPermissions,
+                isGranted = nearbyDevicesPermissions.all { isPermissionGranted(it) },
                 systemDescription = "Allow bitchat to connect to nearby devices"
             )
         )

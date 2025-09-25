@@ -1,19 +1,23 @@
 package com.bitchat.android.services
 
 import android.content.Context
+import android.os.Build
 import android.util.Log
 import com.bitchat.android.mesh.BluetoothMeshService
 import com.bitchat.android.model.ReadReceipt
 import com.bitchat.android.nostr.NostrTransport
+import com.bitchat.android.`wifi-aware`.WiFiAwareTransport
 
 /**
- * Routes messages between BLE mesh and Nostr transports, matching iOS behavior.
+ * Routes messages between BLE mesh and Nostr transports, matching iOS behavior,
+ * or through the Wi-Fi Aware transport (Android only).
  */
 class MessageRouter private constructor(
     private val context: Context,
     private val mesh: BluetoothMeshService,
     private val nostr: NostrTransport
 ) {
+    private var wifiAware: WiFiAwareTransport? = null
     companion object {
         private const val TAG = "MessageRouter"
         @Volatile private var INSTANCE: MessageRouter? = null
@@ -40,6 +44,14 @@ class MessageRouter private constructor(
 
     // Outbox: peerID -> queued (content, nickname, messageID)
     private val outbox = mutableMapOf<String, MutableList<Triple<String, String, String>>>()
+    
+    fun initializeWiFiAware() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && wifiAware == null) {
+            wifiAware = WiFiAwareTransport(context, null) { mesh.delegate?.getNickname() }
+            wifiAware?.startServices()
+            Log.d(TAG, "WiFi Aware transport initialized")
+        }
+    }
 
     // Listener for favorites changes to flush outbox when npub mapping appears/changes
     private val favoriteListener = object: com.bitchat.android.favorites.FavoritesChangeListener {
@@ -72,14 +84,19 @@ class MessageRouter private constructor(
 
         val hasMesh = mesh.getPeerInfo(toPeerID)?.isConnected == true
         val hasEstablished = mesh.hasEstablishedSession(toPeerID)
-        if (hasMesh && hasEstablished) {
+        val hasWiFiAware = wifiAware?.isActive == true && wifiAware?.getPeerList()?.contains(toPeerID) == true
+        
+        if (hasWiFiAware) {
+            Log.d(TAG, "Routing PM via WiFi Aware to ${toPeerID} msg_id=${messageID.take(8)}…")
+            wifiAware?.sendPrivateMessage(content, toPeerID, recipientNickname, messageID)
+        } else if (hasMesh && hasEstablished) {
             Log.d(TAG, "Routing PM via mesh to ${toPeerID} msg_id=${messageID.take(8)}…")
             mesh.sendPrivateMessage(content, toPeerID, recipientNickname, messageID)
         } else if (canSendViaNostr(toPeerID)) {
             Log.d(TAG, "Routing PM via Nostr to ${toPeerID.take(32)}… msg_id=${messageID.take(8)}…")
             nostr.sendPrivateMessage(content, toPeerID, recipientNickname, messageID)
         } else {
-            Log.d(TAG, "Queued PM for ${toPeerID} (no mesh, no Nostr mapping) msg_id=${messageID.take(8)}…")
+            Log.d(TAG, "Queued PM for ${toPeerID} (no mesh, no WiFi Aware, no Nostr mapping) msg_id=${messageID.take(8)}…")
             val q = outbox.getOrPut(toPeerID) { mutableListOf() }
             q.add(Triple(content, recipientNickname, messageID))
             Log.d(TAG, "Initiating noise handshake after queueing PM for ${toPeerID.take(8)}…")
@@ -88,7 +105,12 @@ class MessageRouter private constructor(
     }
 
     fun sendReadReceipt(receipt: ReadReceipt, toPeerID: String) {
-        if ((mesh.getPeerInfo(toPeerID)?.isConnected == true) && mesh.hasEstablishedSession(toPeerID)) {
+        val hasWiFiAware = wifiAware?.isActive == true && wifiAware?.getPeerList()?.contains(toPeerID) == true
+        
+        if (hasWiFiAware) {
+            Log.d(TAG, "Routing READ via WiFi Aware to ${toPeerID.take(8)}… id=${receipt.originalMessageID.take(8)}…")
+            wifiAware?.sendReadReceipt(receipt.originalMessageID, toPeerID)
+        } else if ((mesh.getPeerInfo(toPeerID)?.isConnected == true) && mesh.hasEstablishedSession(toPeerID)) {
             Log.d(TAG, "Routing READ via mesh to ${toPeerID.take(8)}… id=${receipt.originalMessageID.take(8)}…")
             mesh.sendReadReceipt(receipt.originalMessageID, toPeerID, mesh.getPeerNicknames()[toPeerID] ?: mesh.myPeerID)
         } else {
@@ -132,6 +154,7 @@ class MessageRouter private constructor(
         while (iterator.hasNext()) {
             val (content, nickname, messageID) = iterator.next()
             var hasMesh = mesh.getPeerInfo(peerID)?.isConnected == true && mesh.hasEstablishedSession(peerID)
+            val hasWiFiAware = wifiAware?.isActive == true && wifiAware?.getPeerList()?.contains(peerID) == true
             // If this is a noiseHex key, see if there is a connected mesh peer for this identity
             if (!hasMesh && peerID.length == 64 && peerID.matches(Regex("^[0-9a-fA-F]+$"))) {
                 val meshPeer = resolveMeshPeerForNoiseHex(peerID)
@@ -142,7 +165,10 @@ class MessageRouter private constructor(
                 }
             }
             val canNostr = canSendViaNostr(peerID)
-            if (hasMesh) {
+            if (hasWiFiAware) {
+                wifiAware?.sendPrivateMessage(content, peerID, nickname, messageID)
+                iterator.remove()
+            } else if (hasMesh) {
                 mesh.sendPrivateMessage(content, peerID, nickname, messageID)
                 iterator.remove()
             } else if (canNostr) {
