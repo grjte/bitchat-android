@@ -8,17 +8,17 @@ import android.util.Log
 import androidx.annotation.RequiresApi
 import androidx.core.content.ContextCompat
 import com.bitchat.android.crypto.EncryptionService
-import com.bitchat.android.model.BitchatMessage
+import com.bitchat.android.model.IdentityAnnouncement
+import com.bitchat.android.protocol.BitchatPacket
+import com.bitchat.android.protocol.BinaryProtocol
+import com.bitchat.android.protocol.MessageType
+import com.bitchat.android.protocol.MessagePadding
 import kotlinx.coroutines.*
 import java.nio.charset.StandardCharsets
-import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 
 interface WiFiAwareDelegate {
-    fun didReceiveMessage(message: BitchatMessage)
     fun didUpdatePeerList(peers: List<String>)
-    fun didReceiveReadReceipt(messageID: String, from: String)
-    fun didReceiveDeliveryAck(messageID: String, from: String)
 }
 
 @RequiresApi(Build.VERSION_CODES.S)
@@ -30,11 +30,7 @@ class WiFiAwareTransport(
     companion object {
         private const val TAG = "WiFiAwareTransport"
         private const val SERVICE_NAME = "BitchatWiFiAware"
-        private const val MESSAGE_TYPE_PRIVATE = 1
-        private const val MESSAGE_TYPE_READ_RECEIPT = 2
-        private const val MESSAGE_TYPE_DELIVERY_ACK = 3
-        private const val MESSAGE_TYPE_ANNOUNCEMENT = 4
-        private const val MAX_MESSAGE_SIZE = 255 // WiFi Aware message size limit
+        private const val WIFI_AWARE_SSI_MAX_SIZE = 255
     }
 
     private var wifiAwareManager: WifiAwareManager? = null
@@ -54,6 +50,10 @@ class WiFiAwareTransport(
 
     private data class PeerInfo(
         val peerHandle: PeerHandle,
+        val peerID: String,
+        val nickname: String,
+        val noisePublicKey: ByteArray,
+        val signingPublicKey: ByteArray,
         val lastSeen: Long = System.currentTimeMillis()
     )
 
@@ -115,23 +115,95 @@ class WiFiAwareTransport(
         activePeers.clear()
     }
 
+    private fun createAnnouncementPacket(): ByteArray? {
+        try {
+            val nickname = getNickname() ?: myPeerID
+            
+            // Get the static public key for the announcement
+            val staticKey = encryptionService.getStaticPublicKey()
+            if (staticKey == null) {
+                Log.e(TAG, "No static public key available for announcement")
+                return null
+            }
+            
+            // Get the signing public key for the announcement
+            val signingKey = encryptionService.getSigningPublicKey()
+            if (signingKey == null) {
+                Log.e(TAG, "No signing public key available for announcement")
+                return null
+            }
+            
+            // Create IdentityAnnouncement with TLV encoding
+            val announcement = IdentityAnnouncement(nickname, staticKey, signingKey)
+            val tlvPayload = announcement.encode()
+            if (tlvPayload == null) {
+                Log.e(TAG, "Failed to encode announcement as TLV")
+                return null
+            }
+            
+            // Create announcement packet with TTL=0 for discovery
+            val announcePacket = BitchatPacket(
+                type = MessageType.ANNOUNCE.value,
+                ttl = 0u,  // No forwarding for discovery
+                senderID = myPeerID,
+                payload = tlvPayload
+            )
+            
+            // Sign the packet using our signing key (exactly like iOS)
+            val signedPacket = encryptionService.signData(announcePacket.toBinaryDataForSigning()!!)?.let { signature ->
+                announcePacket.copy(signature = signature)
+            } ?: announcePacket
+            
+            // Convert to binary
+            var binary = BinaryProtocol.encode(signedPacket)
+            if (binary == null) {
+                Log.e(TAG, "Failed to encode announcement to binary")
+                return null
+            }
+
+
+            // MessagePadding uses blocks of 256n but Wi-Fi Aware SSI has limit of 255 bytes.
+            // Un-pad, check length, re-pad to 255
+            // TODO: it would be better to pad correctly during encoding;
+            // for now, we're minimizing changes to other sections of the codebase
+            val unpaddedBinary = MessagePadding.unpad(binary)
+            if (unpaddedBinary.size > WIFI_AWARE_SSI_MAX_SIZE) {
+                Log.e(TAG, "Announcement too large for WiFi Aware SSI: ${unpaddedBinary.size} bytes (max: $WIFI_AWARE_SSI_MAX_SIZE)")
+                return null
+            }
+            binary = MessagePadding.pad(unpaddedBinary, WIFI_AWARE_SSI_MAX_SIZE)
+
+            return binary
+        } catch (e: Exception) {
+            Log.e(TAG, "Error creating announcement packet", e)
+            return null
+        }
+    }
+
     private fun startPublishing() {
+        // Create announcement packet for Service Specific Info
+        val announcementData = createAnnouncementPacket()
+        if (announcementData == null) {
+            Log.e(TAG, "Failed to create announcement packet for publishing")
+            return
+        }
+        
         val config = PublishConfig.Builder()
             .setServiceName(SERVICE_NAME)
+            .setServiceSpecificInfo(announcementData)
             .setPublishType(PublishConfig.PUBLISH_TYPE_UNSOLICITED)
             .setTtlSec(0) // 0 means publish until explicitly stopped
             .build()
 
         wifiAwareSession?.publish(config, object : DiscoverySessionCallback() {
             override fun onPublishStarted(session: PublishDiscoverySession) {
-                Log.d(TAG, "Publishing started")
+                Log.d(TAG, "Publishing started with announcement in SSI")
                 publishDiscoverySession = session
-                // Send initial announcement
-                sendAnnouncementBroadcast()
             }
 
             override fun onMessageReceived(peerHandle: PeerHandle, message: ByteArray) {
-                handleIncomingMessage(peerHandle, message)
+                // Message handling will be implemented when connections are established
+                Log.d(TAG, "Received message from peer (not processed in discovery phase)")
             }
         }, null)
     }
@@ -154,232 +226,98 @@ class WiFiAwareTransport(
                 serviceSpecificInfo: ByteArray,
                 matchFilter: List<ByteArray>
             ) {
-                Log.d(TAG, "Service discovered from peer")
-                // Send announcement to newly discovered peer
-                sendAnnouncementToPeer(peerHandle)
+                Log.d(TAG, "Service discovered from peer, SSI size: ${serviceSpecificInfo.size}")
+                
+                // Process announcement from Service Specific Info
+                handleAnnounce(peerHandle, serviceSpecificInfo)
             }
 
             override fun onMessageReceived(peerHandle: PeerHandle, message: ByteArray) {
-                handleIncomingMessage(peerHandle, message)
+                // Message handling will be implemented when connections are established
+                Log.d(TAG, "Received message from peer (not processed in discovery phase)")
             }
         }, null)
     }
-
-    private fun handleIncomingMessage(peerHandle: PeerHandle, data: ByteArray) {
+    
+    private fun handleAnnounce(peerHandle: PeerHandle, ssiData: ByteArray) {
         transportScope.launch {
             try {
-                if (data.isEmpty()) return@launch
-                
-                val messageType = data[0].toInt()
-                val payload = data.copyOfRange(1, data.size)
-                
-                when (messageType) {
-                    MESSAGE_TYPE_ANNOUNCEMENT -> handleAnnouncement(peerHandle, payload)
-                    MESSAGE_TYPE_PRIVATE -> handlePrivateMessage(peerHandle, payload)
-                    MESSAGE_TYPE_READ_RECEIPT -> handleReadReceipt(peerHandle, payload)
-                    MESSAGE_TYPE_DELIVERY_ACK -> handleDeliveryAck(peerHandle, payload)
+                // Decode the BitchatPacket from binary
+                val packet = BinaryProtocol.decode(ssiData)
+                if (packet == null) {
+                    Log.e(TAG, "Failed to decode announcement packet from SSI")
+                    return@launch
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error handling incoming message", e)
-            }
-        }
-    }
-
-    private suspend fun handleAnnouncement(peerHandle: PeerHandle, data: ByteArray) {
-        try {
-            val announcement = String(data, StandardCharsets.UTF_8)
-            val parts = announcement.split("|")
-            if (parts.size >= 2) {
-                val peerID = parts[0]
-                val nickname = parts[1]
                 
-                activePeers[peerID] = PeerInfo(peerHandle)
+                // Verify it's an announcement
+                if (packet.type != MessageType.ANNOUNCE.value) {
+                    Log.w(TAG, "SSI packet is not an announcement: type=${packet.type}")
+                    return@launch
+                }
                 
+                // Verify signature
+                val verificationData = packet.toBinaryDataForSigning()
+                val signature = packet.signature
+                if (verificationData == null || signature == null) {
+                    Log.w(TAG, "Cannot verify announcement - missing data or signature")
+                    return@launch
+                }
+                
+                // Decode the identity announcement
+                val announcement = IdentityAnnouncement.decode(packet.payload)
+                if (announcement == null) {
+                    Log.e(TAG, "Failed to decode identity announcement from payload")
+                    return@launch
+                }
+                
+                // Verify signature using the signing public key from announcement
+                val verified = encryptionService.verifyEd25519Signature(
+                    signature,
+                    verificationData,
+                    announcement.signingPublicKey
+                )
+                
+                val peerID = packet.senderID.take(8).toByteArray().joinToString("") { "%02x".format(it) }
+                
+                if (!verified) {
+                    Log.w(TAG, "Invalid signature on announcement from $peerID")
+                    return@launch
+                }
+                
+                Log.d(TAG, "Verified announcement from $peerID: ${announcement.nickname}")
+                
+                // Store peer info
+                val peerInfo = PeerInfo(
+                    peerHandle = peerHandle,
+                    peerID = peerID,
+                    nickname = announcement.nickname,
+                    noisePublicKey = announcement.noisePublicKey,
+                    signingPublicKey = announcement.signingPublicKey
+                )
+                
+                activePeers[peerID] = peerInfo
+                
+                // Notify delegate
                 withContext(Dispatchers.Main) {
                     delegate?.didUpdatePeerList(activePeers.keys.toList())
                 }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error handling announcement", e)
-        }
-    }
-
-    private suspend fun handlePrivateMessage(peerHandle: PeerHandle, data: ByteArray) {
-        try {
-            val messageStr = String(data, StandardCharsets.UTF_8)
-            val parts = messageStr.split("|", limit = 5)
-            if (parts.size >= 5) {
-                val messageID = parts[0]
-                val senderID = parts[1]
-                val senderNickname = parts[2]
-                val timestamp = parts[3].toLongOrNull() ?: System.currentTimeMillis()
-                val content = parts[4]
                 
-                val message = BitchatMessage(
-                    id = messageID,
-                    sender = senderNickname,
-                    content = content,
-                    timestamp = Date(timestamp),
-                    isPrivate = true,
-                    senderPeerID = senderID
-                )
-                
-                withContext(Dispatchers.Main) {
-                    delegate?.didReceiveMessage(message)
-                }
-                
-                // Send delivery acknowledgment
-                sendDeliveryAck(messageID, senderID)
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error handling private message", e)
-        }
-    }
-
-    private suspend fun handleReadReceipt(peerHandle: PeerHandle, data: ByteArray) {
-        try {
-            val receipt = String(data, StandardCharsets.UTF_8)
-            val parts = receipt.split("|")
-            if (parts.size >= 2) {
-                val messageID = parts[0]
-                val readerID = parts[1]
-                
-                withContext(Dispatchers.Main) {
-                    delegate?.didReceiveReadReceipt(messageID, readerID)
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error handling read receipt", e)
-        }
-    }
-
-    private suspend fun handleDeliveryAck(peerHandle: PeerHandle, data: ByteArray) {
-        try {
-            val ack = String(data, StandardCharsets.UTF_8)
-            val parts = ack.split("|")
-            if (parts.size >= 2) {
-                val messageID = parts[0]
-                val receiverID = parts[1]
-                
-                withContext(Dispatchers.Main) {
-                    delegate?.didReceiveDeliveryAck(messageID, receiverID)
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error handling delivery ack", e)
-        }
-    }
-
-    fun sendPrivateMessage(
-        content: String,
-        to: String,
-        recipientNickname: String,
-        messageID: String? = null
-    ) {
-        transportScope.launch {
-            try {
-                val peer = activePeers[to]
-                if (peer == null) {
-                    Log.w(TAG, "Peer $to not found in active peers")
-                    return@launch
-                }
-                
-                val id = messageID ?: UUID.randomUUID().toString()
-                val nickname = getNickname() ?: myPeerID
-                val message = "$id|$myPeerID|$nickname|${System.currentTimeMillis()}|$content"
-                val data = byteArrayOf(MESSAGE_TYPE_PRIVATE.toByte()) + message.toByteArray(StandardCharsets.UTF_8)
-                
-                if (data.size > MAX_MESSAGE_SIZE) {
-                    Log.w(TAG, "Message too large for WiFi Aware. Size: ${data.size}")
-                    // TODO: Implement fragmentation
-                    return@launch
-                }
-                
-                publishDiscoverySession?.sendMessage(peer.peerHandle, 0, data)
-                Log.d(TAG, "Sent private message to $to")
             } catch (e: Exception) {
-                Log.e(TAG, "Error sending private message", e)
+                Log.e(TAG, "Error processing announcement from SSI", e)
             }
         }
     }
 
-    fun sendReadReceipt(messageID: String, to: String) {
-        transportScope.launch {
-            try {
-                val peer = activePeers[to]
-                if (peer == null) {
-                    Log.w(TAG, "Peer $to not found for read receipt")
-                    return@launch
-                }
-                
-                val receipt = "$messageID|$myPeerID"
-                val data = byteArrayOf(MESSAGE_TYPE_READ_RECEIPT.toByte()) + receipt.toByteArray(StandardCharsets.UTF_8)
-                
-                publishDiscoverySession?.sendMessage(peer.peerHandle, 0, data)
-                Log.d(TAG, "Sent read receipt for $messageID to $to")
-            } catch (e: Exception) {
-                Log.e(TAG, "Error sending read receipt", e)
-            }
-        }
-    }
-
-    private fun sendDeliveryAck(messageID: String, to: String) {
-        transportScope.launch {
-            try {
-                val peer = activePeers[to]
-                if (peer == null) {
-                    Log.w(TAG, "Peer $to not found for delivery ack")
-                    return@launch
-                }
-                
-                val ack = "$messageID|$myPeerID"
-                val data = byteArrayOf(MESSAGE_TYPE_DELIVERY_ACK.toByte()) + ack.toByteArray(StandardCharsets.UTF_8)
-                
-                publishDiscoverySession?.sendMessage(peer.peerHandle, 0, data)
-                Log.d(TAG, "Sent delivery ack for $messageID to $to")
-            } catch (e: Exception) {
-                Log.e(TAG, "Error sending delivery ack", e)
-            }
-        }
-    }
-
-    private fun sendAnnouncementBroadcast() {
-        transportScope.launch {
-            try {
-                val nickname = getNickname() ?: myPeerID
-                val announcement = "$myPeerID|$nickname"
-                val data = byteArrayOf(MESSAGE_TYPE_ANNOUNCEMENT.toByte()) + announcement.toByteArray(StandardCharsets.UTF_8)
-                
-                // WiFi Aware doesn't support true broadcast, so we send to all known peers
-                activePeers.forEach { (_, peer) ->
-                    publishDiscoverySession?.sendMessage(peer.peerHandle, 0, data)
-                }
-                
-                Log.d(TAG, "Sent announcement broadcast")
-            } catch (e: Exception) {
-                Log.e(TAG, "Error sending announcement", e)
-            }
-        }
-    }
-
-    private fun sendAnnouncementToPeer(peerHandle: PeerHandle) {
-        transportScope.launch {
-            try {
-                val nickname = getNickname() ?: myPeerID
-                val announcement = "$myPeerID|$nickname"
-                val data = byteArrayOf(MESSAGE_TYPE_ANNOUNCEMENT.toByte()) + announcement.toByteArray(StandardCharsets.UTF_8)
-                
-                publishDiscoverySession?.sendMessage(peerHandle, 0, data)
-                Log.d(TAG, "Sent announcement to peer")
-            } catch (e: Exception) {
-                Log.e(TAG, "Error sending announcement to peer", e)
-            }
-        }
-    }
 
     fun getPeerList(): List<String> {
         return activePeers.keys.toList()
     }
+    
+    // TODO: Future connection establishment methods will be added here
+    // These will handle:
+    // - Creating WiFi Aware network connections to discovered peers
+    // - Establishing secure channels using the exchanged Noise keys
+    // - Transitioning from discovery phase to connected phase
 
     fun getDebugStatus(): String {
         return """
