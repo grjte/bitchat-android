@@ -31,6 +31,11 @@ class WiFiAwareTransport(
         private const val TAG = "WiFiAwareTransport"
         private const val SERVICE_NAME = "BitchatWiFiAware"
         private const val WIFI_AWARE_SSI_MAX_SIZE = 255
+        
+        // Connection message types
+        private const val MSG_CONNECTION_REQUEST = "CONNECTION_REQUEST"
+        private const val MSG_CONNECTION_UNAVAILABLE = "CONNECTION_UNAVAILABLE"
+        private const val MSG_CONNECTION_REDIRECT = "CONNECTION_REDIRECT"  // Role swap in progress
     }
 
     private var wifiAwareManager: WifiAwareManager? = null
@@ -39,6 +44,7 @@ class WiFiAwareTransport(
     private var subscribeDiscoverySession: SubscribeDiscoverySession? = null
     
     private val activePeers = ConcurrentHashMap<String, PeerInfo>()
+    private val activeConnections = ConcurrentHashMap<String, WiFiAwareConnection>()
     private val transportScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val encryptionService = EncryptionService(context)
     private var myAnnouncementPacket: ByteArray? = null  // Cache our announcement
@@ -56,6 +62,35 @@ class WiFiAwareTransport(
         val nickname: String,
         val noisePublicKey: ByteArray,
         val signingPublicKey: ByteArray
+    )
+    
+    private data class ConnectionState(
+        var serverConnectionsCount: Int = 0,
+        var hasClientConnection: Boolean = false,
+        val maxDataPaths: Int
+    ) {
+        val usedDataPaths: Int 
+            get() = serverConnectionsCount + (if (hasClientConnection) 1 else 0)
+        
+        fun canBeServer() = usedDataPaths < maxDataPaths
+        fun canBeClient() = !hasClientConnection && usedDataPaths < maxDataPaths
+    }
+    
+    private enum class ConnectionRole {
+        CLIENT,
+        SERVER
+    }
+    
+    private data class WiFiAwareConnection(
+        val peerID: String,
+        val role: ConnectionRole,
+        val socket: java.net.Socket? = null,
+        val serverSocket: java.net.ServerSocket? = null,
+        val network: android.net.Network? = null
+    )
+    
+    private var connectionState = ConnectionState(
+        maxDataPaths = 2  // Will be updated when WiFi Aware is initialized
     )
 
     fun startServices(): Boolean {
@@ -85,9 +120,15 @@ class WiFiAwareTransport(
                 return false
             }
 
+            // Update connection state with actual capabilities
+            connectionState = ConnectionState(
+                maxDataPaths = wifiAwareManager!!.characteristics?.numberOfSupportedDataPaths ?: 2
+            )
+            
             wifiAwareManager!!.attach(object : AttachCallback() {
                 override fun onAttached(session: WifiAwareSession) {
                     Log.d(TAG, "WiFi Aware attached successfully")
+                    Log.d(TAG, "Supported data paths: ${connectionState.maxDataPaths}")
                     wifiAwareSession = session
                     startPublishing()
                     startSubscribing()
@@ -336,14 +377,28 @@ class WiFiAwareTransport(
     private fun handlePublishMessage(peerHandle: PeerHandle, message: ByteArray) {
         transportScope.launch {
             try {
-                // First, try to decode as BitchatPacket to check type
+                // First, try to decode as BitchatPacket to check if it's an announcement
                 val packet = BinaryProtocol.decode(message)
                 if (packet != null && packet.type == MessageType.ANNOUNCE.value) {
                     // This is an announcement from a subscriber
                     handleAnnounce(peerHandle, message, isFromPublisher = false)
-                } else {
-                    // Handle other message types (connection negotiation, etc.)
-                    Log.d(TAG, "Received non-announcement message in publisher")
+                    return@launch
+                }
+                
+                // Otherwise, try to parse as a connection message
+                val messageStr = message.toString(Charsets.UTF_8)
+                
+                when {
+                    messageStr == MSG_CONNECTION_REQUEST -> {
+                        // Request from subscriber asking to be client (we should be server)
+                        handleIncomingClientRequest(peerHandle)
+                    }
+                    messageStr == MSG_CONNECTION_UNAVAILABLE -> {
+                        handleConnectionUnavailable(peerHandle)
+                    }
+                    else -> {
+                        Log.w(TAG, "Unknown message in publisher: $messageStr")
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error handling publish message", e)
@@ -354,9 +409,25 @@ class WiFiAwareTransport(
     private fun handleSubscribeMessage(peerHandle: PeerHandle, message: ByteArray) {
         transportScope.launch {
             try {
-                // Handle messages received in subscriber session
-                // These would typically be connection negotiation messages
-                Log.d(TAG, "Received message in subscriber session")
+                val messageStr = message.toString(Charsets.UTF_8)
+                
+                when {
+                    messageStr.startsWith(MSG_CONNECTION_REQUEST) -> {
+                        // Request from publisher saying they're ready as server
+                        val parts = messageStr.split(":", limit = 2)
+                        val canAlsoBeClient = parts.getOrNull(1)?.toBoolean() ?: false
+                        handleIncomingServerOffer(peerHandle, canAlsoBeClient)
+                    }
+                    messageStr == MSG_CONNECTION_REDIRECT -> {
+                        handleConnectionRedirect(peerHandle)
+                    }
+                    messageStr == MSG_CONNECTION_UNAVAILABLE -> {
+                        handleConnectionUnavailable(peerHandle)
+                    }
+                    else -> {
+                        Log.w(TAG, "Unknown message in subscriber: $messageStr")
+                    }
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Error handling subscribe message", e)
             }
@@ -367,11 +438,153 @@ class WiFiAwareTransport(
         return activePeers.keys.toList()
     }
     
-    // TODO: Future connection establishment methods will be added here
-    // These will handle:
-    // - Creating WiFi Aware network connections to discovered peers
-    // - Establishing secure channels using the exchanged Noise keys
-    // - Transitioning from discovery phase to connected phase
+    // Connection management
+    fun sendMessage(peerID: String, packet: BitchatPacket): Boolean {
+        // Check if connection exists
+        val connection = activeConnections[peerID]
+        if (connection != null) {
+            return sendPacketOverConnection(connection, packet)
+        }
+        
+        // Initiate connection if needed
+        return initiateConnection(peerID)
+    }
+    
+    private fun initiateConnection(peerID: String): Boolean {
+        val peerInfo = activePeers[peerID] ?: run {
+            Log.w(TAG, "Cannot initiate connection - peer $peerID not found")
+            return false
+        }
+        
+        // Determine our capabilities
+        val canBeClient = connectionState.canBeClient()
+        val canBeServer = connectionState.canBeServer()
+        
+        when {
+            // Can only be server -> must be server
+            canBeServer && !canBeClient -> {
+                if (peerInfo.subscriberHandle != null) {
+                    startServerForPeer(peerInfo)
+                    // Send via publish session to their subscriber
+                    val message = "$MSG_CONNECTION_REQUEST:false" // Can't also be client
+                    publishDiscoverySession?.sendMessage(peerInfo.subscriberHandle, 0, message.toByteArray())
+                    return true
+                }
+            }
+            // Can only be client -> must be client
+            !canBeServer && canBeClient -> {
+                if (peerInfo.publisherHandle != null) {
+                    // Send via subscribe session to their publisher
+                    subscribeDiscoverySession?.sendMessage(peerInfo.publisherHandle, 0, MSG_CONNECTION_REQUEST.toByteArray())
+                    return true
+                }
+            }
+            // Can be both -> optimistically choose server
+            canBeServer && canBeClient -> {
+                if (peerInfo.subscriberHandle != null) {
+                    startServerForPeer(peerInfo)
+                    // Send via publish session to their subscriber
+                    val message = "$MSG_CONNECTION_REQUEST:true" // Can also be client
+                    publishDiscoverySession?.sendMessage(peerInfo.subscriberHandle, 0, message.toByteArray())
+                    return true
+                } else if (peerInfo.publisherHandle != null) {
+                    // Fallback to client if no subscriber handle
+                    subscribeDiscoverySession?.sendMessage(peerInfo.publisherHandle, 0, MSG_CONNECTION_REQUEST.toByteArray())
+                    return true
+                }
+            }
+            // Cannot be either -> fail
+            else -> {
+                Log.w(TAG, "Cannot establish connection - no available roles")
+                return false
+            }
+        }
+        
+        Log.w(TAG, "Cannot establish connection - no suitable handles for peer $peerID")
+        return false
+    }
+    
+    private fun handleIncomingClientRequest(subscriberHandle: PeerHandle) {
+        // Find peer by subscriber handle
+        val peerInfo = activePeers.values.find { it.subscriberHandle == subscriberHandle } ?: run {
+            Log.w(TAG, "Received client request from unknown subscriber")
+            return
+        }
+        
+        if (connectionState.canBeServer()) {
+            startServerForPeer(peerInfo)
+            // Client should connect when they receive our network info
+        } else {
+            // Send unavailable message
+            publishDiscoverySession?.sendMessage(subscriberHandle, 0, MSG_CONNECTION_UNAVAILABLE.toByteArray())
+        }
+    }
+    
+    private fun handleIncomingServerOffer(publisherHandle: PeerHandle, theyCanAlsoBeClient: Boolean) {
+        // Find peer by publisher handle
+        val peerInfo = activePeers.values.find { it.publisherHandle == publisherHandle } ?: run {
+            Log.w(TAG, "Received server offer from unknown publisher")
+            return
+        }
+        
+        if (connectionState.canBeClient()) {
+            // Connect as client
+            connectAsClientToPeer(peerInfo)
+        } else if (connectionState.canBeServer() && theyCanAlsoBeClient && peerInfo.subscriberHandle != null) {
+            // We can't be client but they can, so redirect
+            // First, tell them via subscriber to redirect (not final unavailable)
+            subscribeDiscoverySession?.sendMessage(publisherHandle, 0, MSG_CONNECTION_REDIRECT.toByteArray())
+            
+            // Then start our server and invite them to connect
+            startServerForPeer(peerInfo)
+            val message = "$MSG_CONNECTION_REQUEST:false" // We can't also be client
+            publishDiscoverySession?.sendMessage(peerInfo.subscriberHandle, 0, message.toByteArray())
+        } else {
+            // No compatible configuration - this is final
+            subscribeDiscoverySession?.sendMessage(publisherHandle, 0, MSG_CONNECTION_UNAVAILABLE.toByteArray())
+        }
+    }
+    
+    private fun handleConnectionRedirect(publisherHandle: PeerHandle) {
+        val peerInfo = activePeers.values.find { it.publisherHandle == publisherHandle } ?: run {
+            Log.w(TAG, "Received redirect from unknown publisher")
+            return
+        }
+        
+        Log.d(TAG, "Connection redirect with peer ${peerInfo.peerID} - shutting down server and waiting for new request")
+        // TODO: Shut down any server we started for this peer
+        // Do NOT fall back to BLE - expect a new connection request
+    }
+    
+    private fun handleConnectionUnavailable(peerHandle: PeerHandle) {
+        val peerInfo = activePeers.values.find { 
+            it.publisherHandle == peerHandle || it.subscriberHandle == peerHandle 
+        } ?: return
+        
+        Log.w(TAG, "Connection unavailable with peer ${peerInfo.peerID} - falling back to BLE")
+        // TODO: Clean up any server we might have started
+        // Let message router handle BLE fallback
+    }
+    
+    private fun startServerForPeer(peerInfo: PeerInfo): Boolean {
+        // TODO: Implement server socket setup
+        Log.d(TAG, "Starting server for peer ${peerInfo.peerID}")
+        connectionState.serverConnectionsCount++
+        return true
+    }
+    
+    private fun connectAsClientToPeer(peerInfo: PeerInfo): Boolean {
+        // TODO: Implement client connection
+        Log.d(TAG, "Connecting as client to peer ${peerInfo.peerID}")
+        connectionState.hasClientConnection = true
+        return true
+    }
+    
+    private fun sendPacketOverConnection(connection: WiFiAwareConnection, packet: BitchatPacket): Boolean {
+        // TODO: Implement packet sending over socket
+        Log.d(TAG, "Sending packet to peer ${connection.peerID}")
+        return true
+    }
 
     fun getDebugStatus(): String {
         return """
