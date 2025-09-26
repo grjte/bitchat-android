@@ -614,6 +614,9 @@ class MainActivity : OrientationAwareActivity() {
                 
                 Log.d("MainActivity", "Mesh service started successfully")
                 
+                // Initialize Wi-Fi Aware now that delegate is set
+                chatViewModel.initializeWiFiAware()
+                
                 // Handle any notification intent
                 handleNotificationIntent(intent)
                 

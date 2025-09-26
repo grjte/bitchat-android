@@ -82,10 +82,24 @@ class MessageRouter private constructor(
             }
         }
 
+        // Check Wi-Fi Aware first (preferred for private messages when available)
+        val hasWifiAwarePeer = wifiAware?.let { aware ->
+            aware.isActive && aware.getPeerList().contains(toPeerID)
+        } ?: false
+        
         val hasMesh = mesh.getPeerInfo(toPeerID)?.isConnected == true
         val hasEstablished = mesh.hasEstablishedSession(toPeerID)
-        // TODO: Wi-Fi Aware messaging will be implemented in the connection phase
-        // For now, we only use Wi-Fi Aware for discovery
+        
+        // If we have a Wi-Fi Aware peer, try it first
+        if (hasWifiAwarePeer) {
+            val sent = wifiAware?.sendPrivateMessage(content, toPeerID, recipientNickname, messageID) ?: false
+            if (sent) {
+                Log.d(TAG, "Routed PM via Wi-Fi Aware to ${toPeerID} msg_id=${messageID.take(8)}…")
+                return
+            } else {
+                Log.d(TAG, "Wi-Fi Aware connection not ready for ${toPeerID}, falling back to other transports")
+            }
+        }
         
         if (hasMesh && hasEstablished) {
             Log.d(TAG, "Routing PM via mesh to ${toPeerID} msg_id=${messageID.take(8)}…")
@@ -148,8 +162,23 @@ class MessageRouter private constructor(
         val iterator = queued.iterator()
         while (iterator.hasNext()) {
             val (content, nickname, messageID) = iterator.next()
+            
+            // Check Wi-Fi Aware first
+            val wifiAwareSent = wifiAware?.let { aware ->
+                if (aware.isActive && aware.getPeerList().contains(peerID)) {
+                    aware.sendPrivateMessage(content, peerID, nickname, messageID)
+                } else {
+                    false
+                }
+            } ?: false
+            
+            if (wifiAwareSent) {
+                Log.d(TAG, "Flushed message to $peerID via Wi-Fi Aware")
+                iterator.remove()
+                continue
+            }
+            
             var hasMesh = mesh.getPeerInfo(peerID)?.isConnected == true && mesh.hasEstablishedSession(peerID)
-            // TODO: Wi-Fi Aware messaging will be implemented in the connection phase
             // If this is a noiseHex key, see if there is a connected mesh peer for this identity
             if (!hasMesh && peerID.length == 64 && peerID.matches(Regex("^[0-9a-fA-F]+$"))) {
                 val meshPeer = resolveMeshPeerForNoiseHex(peerID)
@@ -229,4 +258,12 @@ class MessageRouter private constructor(
         } catch (_: Exception) { null }
         noiseHex?.let { flushOutboxFor(it) }
     }
+    
+    // Called when Wi-Fi Aware establishes a connection
+    fun onWifiAwareConnected(peerID: String) {
+        Log.d(TAG, "Wi-Fi Aware connected to $peerID, flushing outbox")
+        flushOutboxFor(peerID)
+    }
+    
+    fun getWiFiAwareTransport(): WiFiAwareTransport? = wifiAware
 }

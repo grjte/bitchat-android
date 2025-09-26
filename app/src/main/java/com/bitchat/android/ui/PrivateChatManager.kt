@@ -58,6 +58,9 @@ class PrivateChatManager(
         // Establish Noise session if needed before starting the chat
         establishNoiseSessionIfNeeded(peerID, meshService)
 
+        // Establish Wi-Fi Aware connection if needed
+        establishWiFiAwareConnectionIfNeeded(peerID)
+
         // Consolidate any temporary Nostr conversation for this peer into the stable/current peerID
         try {
             consolidateNostrTempConversationIfNeeded(peerID)
@@ -362,6 +365,44 @@ class PrivateChatManager(
      * Establish Noise session if needed before starting private chat
      * Uses same lexicographical logic as MessageHandler.handleNoiseIdentityAnnouncement
      */
+    private fun establishWiFiAwareConnectionIfNeeded(peerID: String) {
+        try {
+            // Get the message router instance
+            val router = com.bitchat.android.services.MessageRouter.tryGetInstance()
+            if (router == null) {
+                Log.d(TAG, "MessageRouter not available, skipping Wi-Fi Aware connection setup")
+                return
+            }
+
+            // Check if Wi-Fi Aware transport exists and has discovered this peer
+            val wifiAware = router.getWiFiAwareTransport()
+            if (wifiAware == null) {
+                Log.d(TAG, "Wi-Fi Aware transport not available")
+                return
+            }
+
+            val peerList = wifiAware.getPeerList()
+            if (!peerList.contains(peerID)) {
+                Log.d(TAG, "Peer $peerID not discovered via Wi-Fi Aware")
+                return
+            }
+
+            // Check if we already have a connection
+            if (wifiAware.hasConnection(peerID)) {
+                Log.d(TAG, "Wi-Fi Aware connection already established with $peerID")
+                return
+            }
+
+            Log.d(TAG, "No Wi-Fi Aware connection with $peerID, initiating connection")
+            
+            // Initiate the connection - this will be handled asynchronously
+            wifiAware.initiateConnection(peerID)
+            
+        } catch (e: Exception) {
+            Log.w(TAG, "Error establishing Wi-Fi Aware connection", e)
+        }
+    }
+
     private fun establishNoiseSessionIfNeeded(peerID: String, meshService: BluetoothMeshService) {
         if (noiseSessionDelegate.hasEstablishedSession(peerID)) {
             Log.d(TAG, "Noise session already established with $peerID")
