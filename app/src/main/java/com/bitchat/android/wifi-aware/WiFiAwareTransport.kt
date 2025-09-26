@@ -41,6 +41,7 @@ class WiFiAwareTransport(
     private val activePeers = ConcurrentHashMap<String, PeerInfo>()
     private val transportScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val encryptionService = EncryptionService(context)
+    private var myAnnouncementPacket: ByteArray? = null  // Cache our announcement
     
     val myPeerID: String
         get() = encryptionService.getIdentityFingerprint().take(16)
@@ -49,12 +50,12 @@ class WiFiAwareTransport(
         private set
 
     private data class PeerInfo(
-        val peerHandle: PeerHandle,
+        val publisherHandle: PeerHandle? = null,     // For sending to them via our subscribeDiscoverySession
+        val subscriberHandle: PeerHandle? = null,    // For sending to them via our publishDiscoverySession
         val peerID: String,
         val nickname: String,
         val noisePublicKey: ByteArray,
-        val signingPublicKey: ByteArray,
-        val lastSeen: Long = System.currentTimeMillis()
+        val signingPublicKey: ByteArray
     )
 
     fun startServices(): Boolean {
@@ -188,6 +189,9 @@ class WiFiAwareTransport(
             return
         }
         
+        // Cache it for later use
+        myAnnouncementPacket = announcementData
+        
         val config = PublishConfig.Builder()
             .setServiceName(SERVICE_NAME)
             .setServiceSpecificInfo(announcementData)
@@ -202,8 +206,8 @@ class WiFiAwareTransport(
             }
 
             override fun onMessageReceived(peerHandle: PeerHandle, message: ByteArray) {
-                // Message handling will be implemented when connections are established
-                Log.d(TAG, "Received message from peer (not processed in discovery phase)")
+                // Messages received here are from subscribers
+                handlePublishMessage(peerHandle, message)
             }
         }, null)
     }
@@ -229,21 +233,28 @@ class WiFiAwareTransport(
                 Log.d(TAG, "Service discovered from peer, SSI size: ${serviceSpecificInfo.size}")
                 
                 // Process announcement from Service Specific Info
-                handleAnnounce(peerHandle, serviceSpecificInfo)
+                // This gives us their publisher handle
+                handleAnnounce(peerHandle, serviceSpecificInfo, isFromPublisher = true)
+                
+                // Send our announcement back to establish bidirectional handle mapping
+                myAnnouncementPacket?.let { announcement ->
+                    Log.d(TAG, "Sending announcement back to peer's publisher")
+                    subscribeDiscoverySession?.sendMessage(peerHandle, 0, announcement)
+                }
             }
 
             override fun onMessageReceived(peerHandle: PeerHandle, message: ByteArray) {
-                // Message handling will be implemented when connections are established
-                Log.d(TAG, "Received message from peer (not processed in discovery phase)")
+                // Could be an announcement or other message type
+                handleSubscribeMessage(peerHandle, message)
             }
         }, null)
     }
     
-    private fun handleAnnounce(peerHandle: PeerHandle, ssiData: ByteArray) {
+    private fun handleAnnounce(peerHandle: PeerHandle, announcementData: ByteArray, isFromPublisher: Boolean) {
         transportScope.launch {
             try {
                 // Decode the BitchatPacket from binary
-                val packet = BinaryProtocol.decode(ssiData)
+                val packet = BinaryProtocol.decode(announcementData)
                 if (packet == null) {
                     Log.e(TAG, "Failed to decode announcement packet from SSI")
                     return@launch
@@ -284,16 +295,29 @@ class WiFiAwareTransport(
                     return@launch
                 }
                 
-                Log.d(TAG, "Verified announcement from $peerID: ${announcement.nickname}")
+                Log.d(TAG, "Verified announcement from $peerID: ${announcement.nickname} (${if (isFromPublisher) "publisher" else "subscriber"} handle)")
                 
-                // Store peer info
-                val peerInfo = PeerInfo(
-                    peerHandle = peerHandle,
-                    peerID = peerID,
-                    nickname = announcement.nickname,
-                    noisePublicKey = announcement.noisePublicKey,
-                    signingPublicKey = announcement.signingPublicKey
-                )
+                // Check if we already know this peer
+                val existingPeer = activePeers[peerID]
+                
+                val peerInfo = if (existingPeer != null) {
+                    // Update with the new handle
+                    if (isFromPublisher) {
+                        existingPeer.copy(publisherHandle = peerHandle)
+                    } else {
+                        existingPeer.copy(subscriberHandle = peerHandle)
+                    }
+                } else {
+                    // New peer
+                    PeerInfo(
+                        publisherHandle = if (isFromPublisher) peerHandle else null,
+                        subscriberHandle = if (!isFromPublisher) peerHandle else null,
+                        peerID = peerID,
+                        nickname = announcement.nickname,
+                        noisePublicKey = announcement.noisePublicKey,
+                        signingPublicKey = announcement.signingPublicKey
+                    )
+                }
                 
                 activePeers[peerID] = peerInfo
                 
@@ -308,6 +332,36 @@ class WiFiAwareTransport(
         }
     }
 
+
+    private fun handlePublishMessage(peerHandle: PeerHandle, message: ByteArray) {
+        transportScope.launch {
+            try {
+                // First, try to decode as BitchatPacket to check type
+                val packet = BinaryProtocol.decode(message)
+                if (packet != null && packet.type == MessageType.ANNOUNCE.value) {
+                    // This is an announcement from a subscriber
+                    handleAnnounce(peerHandle, message, isFromPublisher = false)
+                } else {
+                    // Handle other message types (connection negotiation, etc.)
+                    Log.d(TAG, "Received non-announcement message in publisher")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error handling publish message", e)
+            }
+        }
+    }
+    
+    private fun handleSubscribeMessage(peerHandle: PeerHandle, message: ByteArray) {
+        transportScope.launch {
+            try {
+                // Handle messages received in subscriber session
+                // These would typically be connection negotiation messages
+                Log.d(TAG, "Received message in subscriber session")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error handling subscribe message", e)
+            }
+        }
+    }
 
     fun getPeerList(): List<String> {
         return activePeers.keys.toList()
