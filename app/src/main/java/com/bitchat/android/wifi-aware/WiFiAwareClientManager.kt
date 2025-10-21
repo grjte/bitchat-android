@@ -66,9 +66,9 @@ class WiFiAwareClientManager(
         }
         
         try {
-            // TODO: Derive PSK from peer's public key (must match server's PSK)
-            // val psk = derivePSKFromPeer(peerInfo)
-            val psk = "bitchat-passphrase"
+            // TODO: use discovery messages to perform an ephemeral key exchange
+            //  and derive a shared passphrase for the network connection
+            val psk = "insecure-placeholder-passphrase"
             
             // Create network specifier for client (no port specified)
             val networkSpecifier = WifiAwareNetworkSpecifier.Builder(subscribeSession, publisherHandle)
@@ -207,12 +207,6 @@ class WiFiAwareClientManager(
     fun hasActiveClient(): Boolean = activeClient != null
     
     fun getActiveClientPeerID(): String? = activeClient?.peerID
-    
-    private fun derivePSKFromPeer(peerInfo: WiFiAwareDiscoveryManager.PeerInfo): String {
-        // Must match server's PSK derivation
-        val sharedSecret = peerInfo.noisePublicKey.take(16).joinToString("") { "%02x".format(it) }
-        return "bitchat-$sharedSecret"
-    }
     
     fun shutdown() {
         disconnectClient()

@@ -43,6 +43,9 @@ class WiFiAwareConnectionManager(
         // Determine our capabilities
         val canBeClient = connectionTracker.connectionState.canBeClient()
         val canBeServer = connectionTracker.connectionState.canBeServer()
+
+        // TODO: key exchange should be handled while negotiating the connection so that
+        //  a shared passphrase can be computed and used when setting up the network
         
         when {
             // Can only be server -> must be server
