@@ -1,15 +1,37 @@
-<p align="center">
-    <img src="https://github.com/user-attachments/assets/188c42f8-d249-4a72-b27a-e2b4f10a00a8" alt="Bitchat Android Logo" width="480">
-</p>
+> [!WARNING]
+> This software has not received external security review and contains vulnerabilities. It does not meet its stated security goals. Do not use it for sensitive use cases, and do not rely on its security.
+
+# bitchat for Android - forked to add direct messaging over Wi-Fi Aware (~5x range, ~100x bandwidth)
+
+"A secure, decentralized, peer-to-peer messaging app that works over Bluetooth mesh networks. No internet required for mesh chats, no servers, no phone numbers - just pure encrypted communication. Bitchat also supports geohash channels, which use an internet connection to connect you with others in your geographic area." (from the original [bitchat-android README](https://github.com/permissionlesstech/bitchat-android))
+
+This is a fork of the **Android port** of the original [bitchat iOS app](https://github.com/jackjackbits/bitchat), which maintained 100% protocol compatibility for cross-platform communication. In this fork, that compatibility is preserved, but Wi-Fi Aware connections will only be made between Android devices (in all other cases, messages will continue to be sent over BLE or Nostr).
+
+**This fork provides prototype code that explores the use of Wi-Fi Aware as an additional transport for high-bandwidth and longer-range direct messaging within Bitchat over an encrypted P2P Wi-Fi connection.**
+
+[Wi-Fi Aware](https://www.wi-fi.org/alternative-topologies) is a framework for peer-to-peer Wi-Fi connections that is supported on both [Android](https://developer.android.com/develop/connectivity/wifi/wifi-aware) and [iOS](https://developer.apple.com/documentation/WiFiAware). The range of Wi-Fi Aware is roughly ~5x the range available on Bluetooth Low Energy (BLE) for mobile devices (~50-100m vs. ~10m), and the bandwidth increase is ~100x or more. 
+
+This fork implements Wi-Fi Aware as an additional transport in the [`app/src/main/java/com/bitchat/android/wifi-aware`](https://github.com/grjte/bitchat-android/tree/feat/wifi-aware/app/src/main/java/com/bitchat/android/wifi-aware) directory, with minimal changes within the rest of the code that serve to:
+1. request/check Wi-Fi Aware permissions (and capabilities)
+2. initiate the Wi-Fi Aware service (when available)
+3. make it the preferred transport for direct messaging (when available)
+4. display a Wi-Fi icon in the direct messaging chat UI when peers are connected via a Wi-Fi Aware connection
+
+Read more about this project and the possibilities and challenges of using Wi-Fi Aware for mobile ad-hoc networks [here](https://hackmd.io/@grjte/bitchat-wifi-aware). Learn more about Wi-Fi Aware implementation details and cross-platform compatibility [here](https://hackmd.io/@grjte/cross-platform-wifi-aware).
 
 > [!WARNING]
-> This software has not received external security review and may contain vulnerabilities and may not necessarily meet its stated security goals. Do not use it for sensitive use cases, and do not rely on its security until it has been reviewed. Work in progress.
+> This implementation is NOT SECURE. It should be used only for reference and not for real-world use. It was vibe-coded by Claude with my guidance, which primarily focused on the Wi-Fi Aware connectivity lifecycle, since both Claude Code and ChatGPT are currently unable to handle it correctly. 
+> 
+> In particular: 
+> 1. I have not implemented the cryptography required for peers to agree on a secure passphrase for their Wi-Fi connection (a hard-coded passphrase is used).
+> 2. I have not taken care with handling closed or dropped Wi-Fi Aware connections and ensuring peers are correctly switched back to encrypted messaging over BLE.
+> 3. Any vulnerabilities that existed in the bitchat-android code at the time it was forked are still present.
 
-# bitchat for Android
+The original README for bitchat-android continues below (with minor edits that remove the Google Play Store publication instructions and update the Contributing guidelines.). 
 
-A secure, decentralized, peer-to-peer messaging app that works over Bluetooth mesh networks. No internet required for mesh chats, no servers, no phone numbers - just pure encrypted communication. Bitchat also supports geohash channels, which use an internet connection to connect you with others in your geographic area.
+Note that the installation instructions below are for the official version. To experiment with this version, you'll need to build it locally after cloning this repository. Instructions should otherwise be the same as those written below.
 
-This is the **Android port** of the original [bitchat iOS app](https://github.com/jackjackbits/bitchat), maintaining 100% protocol compatibility for cross-platform communication.
+-----
 
 ## Install bitchat
 
@@ -240,42 +262,6 @@ The Android implementation maintains 100% binary protocol compatibility with iOS
 - **UUIDs**: Same Bluetooth service and characteristic identifiers
 - **Fragmentation**: Compatible message fragmentation for large content
 
-## Publishing to Google Play
-
-### Preparation
-
-1. **Update version information:**
-   ```kotlin
-   // In app/build.gradle.kts
-   defaultConfig {
-       versionCode = 2  // Increment for each release
-       versionName = "1.1.0"  // User-visible version
-   }
-   ```
-
-2. **Create a signed release build:**
-   ```bash
-   ./gradlew assembleRelease
-   ```
-
-3. **Generate app bundle (recommended for Play Store):**
-   ```bash
-   ./gradlew bundleRelease
-   ```
-
-### Play Store Requirements
-
-- **Target API**: Latest Android API (currently 34)
-- **Privacy Policy**: Required for apps requesting sensitive permissions
-- **App Permissions**: Justify Bluetooth and location usage
-- **Content Rating**: Complete questionnaire for age-appropriate content
-
-### Distribution
-
-- **Google Play Store**: Main distribution channel
-- **F-Droid**: For open-source distribution
-- **Direct APK**: For testing and development
-
 ## Cross-Platform Communication
 
 This Android port enables seamless communication with the original iOS bitchat app:
@@ -287,21 +273,10 @@ This Android port enables seamless communication with the original iOS bitchat a
 
 **iOS Version**: For iPhone/iPad users, get the original bitchat at [github.com/jackjackbits/bitchat](https://github.com/jackjackbits/bitchat)
 
+-----
+
 ## Contributing
 
-Contributions are welcome! Key areas for enhancement:
-
-1. **Performance**: Battery optimization and connection reliability
-2. **UI/UX**: Additional Material Design 3 features
-3. **Security**: Enhanced cryptographic features
-4. **Testing**: Unit and integration test coverage
-5. **Documentation**: API documentation and development guides
-
-## Support & Issues
-
-- **Bug Reports**: [Create an issue](../../issues) with device info and logs
-- **Feature Requests**: [Start a discussion](https://github.com/orgs/permissionlesstech/discussions)
-- **Security Issues**: Email security concerns privately
-- **iOS Compatibility**: Cross-reference with [original iOS repo](https://github.com/jackjackbits/bitchat)
-
-For iOS-specific issues, please refer to the [original iOS bitchat repository](https://github.com/jackjackbits/bitchat).
+Please do not attempt to contribute to this repository. It is an exploratory prototype of Bitchat with Wi-Fi Aware. The official repos welcome contributions:
+- https://github.com/permissionlesstech/bitchat
+- https://github.com/permissionlesstech/bitchat-android
