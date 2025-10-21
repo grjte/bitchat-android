@@ -28,9 +28,26 @@ class WiFiAwareDelegateAdapter(
     }
     
     override fun didConnect(peerID: String) {
-        // Log connection event (BluetoothMeshDelegate doesn't have this method)
+        // Log connection event
         Log.d(TAG, "Wi-Fi Aware connected to peer: $peerID")
-        // Could trigger a peer list update if needed
+        
+        // Look up peer nickname
+        val peerNickname = wifiAwareTransport.getPeerNickname(peerID)
+        
+        // Create a system message about the Wi-Fi Aware connection for the private chat
+        val systemMessage = BitchatMessage(
+            id = UUID.randomUUID().toString().uppercase(),
+            sender = "system",
+            content = "Wi-Fi Aware connection opened! Messages will be sent directly over encrypted P2P Wi-Fi",
+            type = BitchatMessageType.Message,
+            timestamp = Date(),
+            isPrivate = true,
+            senderPeerID = peerID,
+            recipientNickname = peerNickname
+        )
+        
+        // Forward to mesh delegate to display in private chat
+        meshDelegate.didReceiveMessage(systemMessage)
     }
     
     override fun didDisconnect(peerID: String) {
