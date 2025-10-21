@@ -33,6 +33,7 @@ class WiFiAwareServerManager(
         fun onServerReady(peerID: String, port: Int)
         fun onClientConnected(peerID: String, socket: Socket)
         fun onServerError(peerID: String, error: String)
+        fun onServerStopped(peerID: String)
     }
     
     var delegate: ServerDelegate? = null
@@ -188,7 +189,11 @@ class WiFiAwareServerManager(
             Log.e(TAG, "Error unregistering network callback", e)
         }
         
+        val peerID = server.peerID
         activeServer = null
+        
+        // Notify delegate that server has stopped
+        delegate?.onServerStopped(peerID)
     }
     
     fun hasActiveServer(): Boolean = activeServer != null

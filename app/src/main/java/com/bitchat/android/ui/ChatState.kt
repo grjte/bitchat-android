@@ -108,6 +108,10 @@ class ChatState {
     private val _peerDirect = MutableLiveData<Map<String, Boolean>>(emptyMap())
     val peerDirect: LiveData<Map<String, Boolean>> = _peerDirect
     
+    // Wi-Fi Aware connection status per peer
+    private val _peerWiFiAwareConnected = MutableLiveData<Map<String, Boolean>>(emptyMap())
+    val peerWiFiAwareConnected: LiveData<Map<String, Boolean>> = _peerWiFiAwareConnected
+    
     // peerIDToPublicKeyFingerprint REMOVED - fingerprints now handled centrally in PeerManager
     
     // Navigation state
@@ -300,6 +304,19 @@ class ChatState {
 
     fun setPeerDirect(direct: Map<String, Boolean>) {
         _peerDirect.value = direct
+    }
+    
+    fun setPeerWiFiAwareConnected(connected: Map<String, Boolean>) {
+        _peerWiFiAwareConnected.value = connected
+    }
+    
+    fun updatePeerWiFiAwareStatus(peerID: String, isConnected: Boolean) {
+        val current = _peerWiFiAwareConnected.value ?: emptyMap()
+        _peerWiFiAwareConnected.postValue(if (isConnected) {
+            current + (peerID to true)
+        } else {
+            current - peerID
+        })
     }
     
     fun setShowAppInfo(show: Boolean) {

@@ -32,6 +32,7 @@ class WiFiAwareClientManager(
     interface ClientDelegate {
         fun onConnected(peerID: String, socket: Socket)
         fun onConnectionError(peerID: String, error: String)
+        fun onClientDisconnected(peerID: String)
     }
     
     var delegate: ClientDelegate? = null
@@ -196,7 +197,11 @@ class WiFiAwareClientManager(
             Log.e(TAG, "Error unregistering network callback", e)
         }
         
+        val peerID = client.peerID
         activeClient = null
+        
+        // Notify delegate that client has disconnected
+        delegate?.onClientDisconnected(peerID)
     }
     
     fun hasActiveClient(): Boolean = activeClient != null

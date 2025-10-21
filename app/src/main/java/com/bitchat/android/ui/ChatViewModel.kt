@@ -131,6 +131,7 @@ class ChatViewModel(
     val peerNicknames: LiveData<Map<String, String>> = state.peerNicknames
     val peerRSSI: LiveData<Map<String, Int>> = state.peerRSSI
     val peerDirect: LiveData<Map<String, Boolean>> = state.peerDirect
+    val peerWiFiAwareConnected: LiveData<Map<String, Boolean>> = state.peerWiFiAwareConnected
     val showAppInfo: LiveData<Boolean> = state.showAppInfo
     val selectedLocationChannel: LiveData<com.bitchat.android.geohash.ChannelID?> = state.selectedLocationChannel
     val isTeleported: LiveData<Boolean> = state.isTeleported
@@ -165,9 +166,18 @@ class ChatViewModel(
                 // Set up Wi-Fi Aware delegate to use our mesh delegate handler
                 val wifiAwareTransport = getWiFiAwareTransport()
                 if (wifiAwareTransport != null) {
-                    val adapter = com.bitchat.android.`wifi-aware`.WiFiAwareDelegateAdapter(meshDelegateHandler, wifiAwareTransport)
+                    val adapter = com.bitchat.android.`wifi-aware`.WiFiAwareDelegateAdapter(
+                        meshDelegateHandler, 
+                        wifiAwareTransport,
+                        onWiFiAwareConnectionChange = { peerID, isConnected ->
+                            state.updatePeerWiFiAwareStatus(peerID, isConnected)
+                        }
+                    )
                     wifiAwareTransport.delegate = adapter
-                    Log.d(TAG, "Wi-Fi Aware transport initialized and delegate set")
+                    Log.d(TAG, "Wi-Fi Aware delegate set, starting services")
+                    
+                    // Now start the services after delegate is set
+                    router.startWiFiAwareServices()
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to initialize Wi-Fi Aware", e)

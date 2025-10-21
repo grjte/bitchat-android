@@ -48,9 +48,14 @@ class MessageRouter private constructor(
     fun initializeWiFiAware() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && wifiAware == null) {
             wifiAware = WiFiAwareTransport(context, null) { mesh.delegate?.getNickname() }
-            wifiAware?.startServices()
-            Log.d(TAG, "WiFi Aware transport initialized")
+            // Don't start services here - let the caller do it after setting the delegate
+            Log.d(TAG, "WiFi Aware transport created")
         }
+    }
+    
+    fun startWiFiAwareServices() {
+        wifiAware?.startServices()
+        Log.d(TAG, "WiFi Aware services started")
     }
 
     // Listener for favorites changes to flush outbox when npub mapping appears/changes

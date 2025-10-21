@@ -82,6 +82,7 @@
   <string name="cd_handshake_in_progress">Handshake in progress</string>
   <string name="cd_encrypted">End-to-end encrypted</string>
   <string name="cd_handshake_failed">Handshake failed</string>
+  <string name="cd_wifi_aware_connected">Wi-Fi Aware direct P2P connection active</string>
 
   <!-- File viewer dialog -->
   <string name="file_viewer_title">📎 File Received</string>

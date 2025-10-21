@@ -12,6 +12,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
+import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.livedata.observeAsState
@@ -252,6 +253,7 @@ fun ChatHeaderContent(
             val peerFingerprints by viewModel.peerFingerprints.observeAsState(emptyMap())
             val peerSessionStates by viewModel.peerSessionStates.observeAsState(emptyMap())
             val peerNicknames by viewModel.peerNicknames.observeAsState(emptyMap())
+            val peerWiFiAwareConnected by viewModel.peerWiFiAwareConnected.observeAsState(emptyMap())
             
             // Reactive favorite computation - no more static lookups!
             val isFavorite = isFavoriteReactive(
@@ -260,8 +262,9 @@ fun ChatHeaderContent(
                 favoritePeers = favoritePeers
             )
             val sessionState = peerSessionStates[selectedPrivatePeer]
+            val isWiFiAwareConnected = peerWiFiAwareConnected[selectedPrivatePeer] == true
             
-            Log.d("ChatHeader", "Header recomposing: peer=$selectedPrivatePeer, isFav=$isFavorite, sessionState=$sessionState")
+            Log.d("ChatHeader", "Header recomposing: peer=$selectedPrivatePeer, isFav=$isFavorite, sessionState=$sessionState, wifiAware=$isWiFiAwareConnected")
             
             // Pass geohash context and people for NIP-17 chat title formatting
             val selectedLocationChannel by viewModel.selectedLocationChannel.observeAsState()
@@ -272,6 +275,7 @@ fun ChatHeaderContent(
                 peerNicknames = peerNicknames,
                 isFavorite = isFavorite,
                 sessionState = sessionState,
+                isWiFiAwareConnected = isWiFiAwareConnected,
                 selectedLocationChannel = selectedLocationChannel,
                 geohashPeople = geohashPeople,
                 onBackClick = onBackClick,
@@ -310,6 +314,7 @@ private fun PrivateChatHeader(
     peerNicknames: Map<String, String>,
     isFavorite: Boolean,
     sessionState: String?,
+    isWiFiAwareConnected: Boolean,
     selectedLocationChannel: com.bitchat.android.geohash.ChannelID?,
     geohashPeople: List<GeoPerson>,
     onBackClick: () -> Unit,
@@ -424,6 +429,17 @@ private fun PrivateChatHeader(
                 NoiseSessionIcon(
                     sessionState = sessionState,
                     modifier = Modifier.size(14.dp)
+                )
+            }
+            
+            // Show Wi-Fi icon when Wi-Fi Aware connection is active
+            if (isWiFiAwareConnected) {
+                Spacer(modifier = Modifier.width(4.dp))
+                Icon(
+                    imageVector = Icons.Filled.Wifi,
+                    contentDescription = stringResource(R.string.cd_wifi_aware_connected),
+                    modifier = Modifier.size(14.dp),
+                    tint = Color(0xFF00C851) // Green for active connection
                 )
             }
 

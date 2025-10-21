@@ -106,6 +106,11 @@ class WiFiAwareTransport(
                 Log.e(TAG, "Server error for peer $peerID: $error")
                 connectionManager.delegate?.onConnectionFailed(peerID, error)
             }
+            
+            override fun onServerStopped(peerID: String) {
+                Log.d(TAG, "Server stopped for peer $peerID")
+                handleConnectionClosed(peerID)
+            }
         }
         
         // Initialize client manager
@@ -119,6 +124,11 @@ class WiFiAwareTransport(
             override fun onConnectionError(peerID: String, error: String) {
                 Log.e(TAG, "Client error for peer $peerID: $error")
                 connectionManager.delegate?.onConnectionFailed(peerID, error)
+            }
+            
+            override fun onClientDisconnected(peerID: String) {
+                Log.d(TAG, "Client disconnected for peer $peerID")
+                handleConnectionClosed(peerID)
             }
         }
         
